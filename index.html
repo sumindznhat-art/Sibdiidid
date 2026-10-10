@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Auto Decoder — HTML + JSON</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, "Segoe UI", sans-serif; margin: 0; padding: 20px; background: #0b1220; color: #e2e8f0; }
+  h1 { font-size: 20px; margin: 0 0 4px; color: #38bdf8; }
+  .hint { color: #94a3b8; font-size: 13px; margin: 0 0 16px; }
+  .drop { border: 2px dashed #334155; border-radius: 10px; padding: 16px; text-align: center; color: #94a3b8; font-size: 13px; margin-bottom: 14px; cursor: pointer; transition: .15s; }
+  .drop:hover, .drop.dragover { border-color: #38bdf8; color: #38bdf8; background: #111c33; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tab { padding: 8px 16px; background: #1e293b; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; color: #94a3b8; }
+  .tab.active { background: #38bdf8; color: #0b1220; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  label { display: block; font-size: 13px; margin-bottom: 6px; color: #cbd5e1; font-weight: 600; }
+  textarea { width: 100%; height: 320px; font-family: ui-monospace, "Cascadia Code", monospace; font-size: 12px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px; padding: 12px; resize: vertical; }
+  textarea:focus { outline: none; border-color: #38bdf8; }
+  .actions { margin: 16px 0; display: flex; gap: 10px; flex-wrap: wrap; }
+  button { background: #38bdf8; color: #0b1220; border: none; padding: 10px 22px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; transition: .15s; }
+  button:hover { background: #0ea5e9; }
+  button.secondary { background: #334155; color: #e2e8f0; }
+  button.secondary:hover { background: #475569; }
+  #status { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; display: none; white-space: pre-wrap; }
+  #status.info { display: block; background: #1e3a5f; color: #93c5fd; }
+  #status.ok   { display: block; background: #064e3b; color: #6ee7b7; }
+  #status.err  { display: block; background: #7f1d1d; color: #fca5a5; }
+  iframe { width: 100%; height: 480px; border: 1px solid #334155; border-radius: 8px; background: #fff; }
+  #sandbox { display: none; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
+  .badge { display: inline-block; background: #1e293b; color: #94a3b8; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-left: 6px; }
+</style>
+</head>
+<body>
+
+<h1>🔓 Auto Decoder — HTML + JSON</h1>
+<p class="hint">Giải mã file obfuscated (Base64 + JS) → tách ra HTML gốc và JSON (nếu có). Mọi thao tác chạy ngay trong trình duyệt, không gửi dữ liệu lên mạng.</p>
+
+<div class="drop" id="drop">
+  📁 Kéo &amp; thả file gốc vào đây — hoặc bấm để chọn
+  <input type="file" id="fileInput" accept=".html,.htm,.txt,.json" hidden>
+</div>
+
+<div class="actions">
+  <button onclick="decode()">🔓 Giải mã</button>
+  <button class="secondary" onclick="downloadFile('html')">💾 Tải HTML</button>
+  <button class="secondary" onclick="downloadFile('json')">💾 Tải JSON</button>
+  <button class="secondary" onclick="clearAll()">🗑️ Xoá</button>
+</div>
+
+<div id="status"></div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="in">📥 Input</div>
+  <div class="tab" data-tab="html">🌐 HTML gốc</div>
+  <div class="tab" data-tab="json">🧩 JSON <span class="badge" id="jsonCount">0</span></div>
+  <div class="tab" data-tab="preview">👁️ Preview</div>
+</div>
+
+<div class="panel active" data-panel="in">
+  <label>Nội dung file gốc</label>
+  <textarea id="input" placeholder="Dán nội dung file HTML gốc vào đây..."></textarea>
+</div>
+
+<div class="panel" data-panel="html">
+  <label>HTML đã decode</label>
+  <textarea id="outputHtml" readonly placeholder="Bấm Giải mã..."></textarea>
+</div>
+
+<div class="panel" data-panel="json">
+  <label>JSON tìm thấy trong HTML / JS</label>
+  <textarea id="outputJson" readonly placeholder="Bấm Giải mã..."></textarea>
+</div>
+
+<div class="panel" data-panel="preview">
+  <iframe id="preview" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+</div>
+
+<iframe id="sandbox" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+
+<script>
+/* ============================================================
+   AUTO DECODER — HTML + JSON
+   - Nạp file gốc vào iframe sandbox → JS tự chạy
+   - Đọc lại DOM sau khi JS chạy → HTML gốc
+   - Quét toàn bộ HTML gốc + biến toàn cục + <script> để tìm JSON
+   ============================================================ */
+
+const $ = id => document.getElementById(id);
+const state = { html: '', json: '' };
+
+/* ---------- Tabs ---------- */
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    document.querySelector(`.panel[data-panel="${t.dataset.tab}"]`).classList.add('active');
+  });
+});
+
+function setStatus(msg, cls) {
+  const el = $('status');
+  el.textContent = msg;
+  el.className = cls || 'info';
+}
+
+function clearAll() {
+  $('input').value = '';
+  $('outputHtml').value = '';
+  $('outputJson').value = '';
+  $('preview').srcdoc = '';
+  $('status').className = '';
+  state.html = '';
+  state.json = '';
+  updateJsonCount(0);
+}
+
+/* ---------- File input & drag-drop ---------- */
+const drop = $('drop');
+const fileInput = $('fileInput');
+
+drop.addEventListener('click', () => fileInput.click());
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.add('dragover');
+}));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.remove('dragover');
+}));
+drop.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f) loadFile(f);
+});
+fileInput.addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) loadFile(f);
+});
+
+async function loadFile(f) {
+  const text = await f.text();
+  $('input').value = text;
+  setStatus(`📂 Đã nạp: ${f.name} (${text.length} ký tự)`, 'info');
+  decode();
+}
+
+/* ============================================================
+   BƯỚC 1 — Chạy file gốc trong sandbox để JS tự decode
+   ============================================================ */
+async function runSandbox(src) {
+  let html = src;
+  if (!/<!doctype|<html/i.test(html)) {
+    html = '<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body>'
+         + html + '</body></html>';
+  }
+
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const iframe = $('sandbox');
+
+  // Reset iframe
+  await new Promise(resolve => {
+    iframe.onload = () => resolve();
+    iframe.src = 'about:blank';
+    setTimeout(() => { iframe.src = url; }, 30);
+  });
+
+  // Chờ JS decode xong (tối đa 10s)
+  const start = Date.now();
+  let doc;
+  while (Date.now() - start < 10000) {
+    await new Promise(r => setTimeout(r, 250));
+    try {
+      doc = iframe.contentDocument || iframe.contentWindow.document;
+      if (!doc) continue;
+      const t = doc.title || '';
+      const bodyLen = doc.body ? doc.body.innerHTML.length : 0;
+      // Nếu tiêu đề không còn "Loading..." và body có nội dung → xong
+      if (!/loading/i.test(t) && bodyLen > 200) break;
+    } catch (_) {}
+  }
+
+  const out = {
+    html: '',
+    globals: {},
+    scripts: [],
+    localStorage: {},
+    sessionStorage: {}
+  };
+
+  try {
+    doc = iframe.contentDocument || iframe.contentWindow.document;
+    out.html = '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
+
+    // Lấy <script> inline (đề phòng có JSON hard-coded)
+    doc.querySelectorAll('script:not([src])').forEach(s => {
+      if (s.textContent && s.textContent.length > 20) out.scripts.push(s.textContent);
+    });
+
+    // Lấy biến toàn cục từ window của iframe
+    const win = iframe.contentWindow;
+    try {
+      for (const k in win) {
+        if (k === 'window' || k === 'self' || k === 'top' || k === 'parent' ||
+            k === 'document' || k === 'location' || k === 'frames') continue;
+        try {
+          const v = win[k];
+          const type = typeof v;
+          if (type === 'object' || type === 'string' || type === 'number' || type === 'boolean') {
+            // Chỉ nhận object có cấu trúc giống JSON
+            if (type === 'object' && v !== null && !(v instanceof Node) &&
+                !(v instanceof Window) && !(v instanceof HTMLElement)) {
+              out.globals[k] = v;
+            }
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+
+    // Storage
+    try {
+      for (let i = 0; i < win.localStorage.length; i++) {
+        const k = win.localStorage.key(i);
+        out.localStorage[k] = win.localStorage.getItem(k);
+      }
+    } catch (_) {}
+    try {
+      for (let i = 0; i < win.sessionStorage.length; i++) {
+        const k = win.sessionStorage.key(i);
+        out.sessionStorage[k] = win.sessionStorage.getItem(k);
+      }
+    } catch (_) {}
+  } catch (e) {
+    setStatus('❌ Không đọc được iframe: ' + e.message, 'err');
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+
+  return out;
+}
+
+/* ============================================================
+   BƯỚC 2 — Trích JSON từ HTML + globals + scripts
+   ============================================================ */
+function tryParseJSON(str) {
+  if (typeof str !== 'string') return null;
+  const s = str.trim();
+  if (s.length < 2) return null;
+  if (!/^[\[{]/.test(s)) return null;
+  try {
+    const parsed = JSON.parse(s);
+    if (parsed && (typeof parsed === 'object')) return parsed;
+  } catch (_) {}
+  return null;
+}
+
+function findJsonInText(text) {
+  const found = [];
+  if (!text) return found;
+
+  // Quét tất cả khối {...} hoặc [...] cân bằng dấu ngoặc
+  const stack = [];
+  let start = -1;
+  let inStr = false, esc = false, quote = '';
+
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === quote) { inStr = false; }
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { inStr = true; quote = c; continue; }
+
+    if (c === '{' || c === '[') {
+      if (stack.length === 0) start = i;
+      stack.push(c);
+    } else if (c === '}' || c === ']') {
+      if (stack.length === 0) continue;
+      stack.pop();
+      if (stack.length === 0 && start >= 0) {
+        const candidate = text.slice(start, i + 1);
+        const parsed = tryParseJSON(candidate);
+        if (parsed && Object.keys(parsed).length > 0) found.push(parsed);
+        start = -1;
+      }
+    }
+  }
+  return found;
+}
+
+function extractAllJson(sandboxResult) {
+  const all = [];
+  const seen = new Set();
+
+  const pushJson = (obj, source) => {
+    try {
+      const key = JSON.stringify(obj);
+      if (key.length < 4) return;
+      if (seen.has(key)) return;
+      seen.add(key);
+      all.push({ source, data: obj });
+    } catch (_) {}
+  };
+
+  // 1. Biến toàn cục
+  for (const k in sandboxResult.globals) {
+    const v = sandboxResult.globals[k];
+    if (v && typeof v === 'object') pushJson(v, 'window.' + k);
+  }
+
+  // 2. Trong <script> inline
+  for (const s of sandboxResult.scripts) {
+    findJsonInText(s).forEach(j => pushJson(j, '<script>'));
+  }
+
+  // 3. Trong HTML tổng thể
+  findJsonInText(sandboxResult.html).forEach(j => pushJson(j, 'html'));
+
+  // 4. Storage
+  for (const [k, v] of Object.entries(sandboxResult.localStorage)) {
+    const parsed = tryParseJSON(v);
+    if (parsed) pushJson(parsed, 'localStorage.' + k);
+  }
+  for (const [k, v] of Object.entries(sandboxResult.sessionStorage)) {
+    const parsed = tryParseJSON(v);
+    if (parsed) pushJson(parsed, 'sessionStorage.' + k);
+  }
+
+  // Sắp xếp: JSON lớn/giàu thông tin lên đầu
+  all.sort((a, b) => {
+    const sa = JSON.stringify(a.data).length;
+    const sb = JSON.stringify(b.data).length;
+    return sb - sa;
+  });
+
+  return all;
+}
+
+function updateJsonCount(n) {
+  $('jsonCount').textContent = n;
+}
+
+/* ============================================================
+   BƯỚC 3 — Hàm chính
+   ============================================================ */
+async function decode() {
+  const src = $('input').value;
+  if (!src.trim()) {
+    setStatus('⚠️ Chưa có nội dung. Hãy dán hoặc kéo–thả file gốc.', 'err');
+    return;
+  }
+
+  setStatus('⏳ Đang chạy JS obfuscated và trích JSON...', 'info');
+
+  const result = await runSandbox(src);
+
+  if (!result.html) {
+    setStatus('❌ Không lấy được HTML. Thử lại hoặc tăng thời gian chờ.', 'err');
+    return;
+  }
+
+  state.html = result.html;
+  $('outputHtml').value = result.html;
+
+  const jsonList = extractAllJson(result);
+  if (jsonList.length > 0) {
+    // Gộp tất cả JSON vào 1 object gọn gàng
+    const merged = {};
+    jsonList.forEach((j, i) => {
+      const key = j.source + (i > 0 ? ' #' + (i + 1) : '');
+      merged[key] = j.data;
+    });
+    state.json = JSON.stringify(merged, null, 2);
+    $('outputJson').value = state.json;
+  } else {
+    state.json = '';
+    $('outputJson').value = '// Không tìm thấy JSON nào trong file này.';
+  }
+  updateJsonCount(jsonList.length);
+
+  $('preview').srcdoc = result.html;
+
+  const loading = /<title>\s*Loading\.\.\.\s*<\/title>/i.test(result.html)
+               && !/ToolLc79/i.test(result.html);
+
+  if (loading) {
+    setStatus('⚠️ JS có thể chưa chạy xong. Bấm Giải mã lại sau vài giây.', 'err');
+  } else {
+    setStatus(
+      `✅ Xong! HTML: ${result.html.length.toLocaleString()} ký tự · JSON: ${jsonList.length} khối`
+      + (result.scripts.length ? ` · Script inline: ${result.scripts.length}` : ''),
+      'ok'
+    );
+  }
+
+  // Chuyển sang tab HTML
+  document.querySelector('.tab[data-tab="html"]').click();
+}
+
+/* ============================================================
+   Tải file
+   ============================================================ */
+function downloadFile(type) {
+  let content, name, mime;
+  if (type === 'html') {
+    content = state.html;
+    name = 'ToolLc79.decoded.html';
+    mime = 'text/html;charset=utf-8';
+  } else {
+    content = state.json;
+    name = 'ToolLc79.decoded.json';
+    mime = 'application/json;charset=utf-8';
+  }
+  if (!content || !content.trim()) {
+    setStatus('⚠️ Chưa có nội dung để tải.', 'err');
+    return;
+  }
+  const blob = new Blob([content], { type: mime });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+  setStatus('💾 Đã tải: ' + name, 'ok');
+}
+</script>
+
+</body>
+</html>
